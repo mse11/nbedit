@@ -15,6 +15,92 @@ class StateUndoHistory {
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////// EDITOR DOCUMENT_SAVE //////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////
+
+class EditorManagerFileSave {
+    constructor(mng_ctx_sel, renderBtn_elem, documentName_elem) {
+
+        EditorManagerContentSelection.assertInstance(mng_ctx_sel)
+
+        this.mng_ctx_sel = mng_ctx_sel;
+        this.renderBtn_elem = renderBtn_elem;
+        this.documentName_elem = documentName_elem;
+        this.setup_listeners()
+    }
+
+    setup_listeners()
+    {
+        // Save/render button
+        this.renderBtn_elem.addEventListener('click', this.saveDocument);
+    }
+
+    saveDocument = async (e) => {
+        const docName = this.documentName_elem.value.trim();
+        const content = this.mng_ctx_sel.contentGet();
+
+        if (!docName) {
+            alert('Please enter a document name before saving');
+            return;
+        }
+
+        if (!content.trim()) {
+            alert('Document is empty - nothing to save');
+            return;
+        }
+
+        try {
+            // Show saving state
+            this.renderBtn_elem.textContent = '💾 Saving...';
+            this.renderBtn_elem.disabled = true;
+            this.renderBtn_elem.style.backgroundColor = '#f59e0b';
+            this.renderBtn_elem.style.color = 'white';
+
+            const response = await fetch('/api/save-document', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    documentName: docName,
+                    content: content
+                })
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Save failed');
+            }
+
+            const result = await response.json();
+            console.log('Document saved:', result.path);
+
+            // Success feedback
+            this.renderBtn_elem.textContent = '✓ Saved!';
+            this.renderBtn_elem.style.backgroundColor = '#16a34a';
+            this.renderBtn_elem.style.color = 'white';
+
+            setTimeout(() => {
+                this.renderBtn_elem.textContent = 'Render';
+                this.renderBtn_elem.disabled = false;
+                this.renderBtn_elem.style.backgroundColor = '';
+                this.renderBtn_elem.style.color = '';
+            }, 2000);
+
+        } catch (error) {
+            console.error('Save error:', error);
+            alert(`Failed to save document: ${error.message}`);
+
+            // Reset button state
+            this.renderBtn_elem.textContent = 'Render';
+            this.renderBtn_elem.disabled = false;
+            this.renderBtn_elem.style.backgroundColor = '';
+            this.renderBtn_elem.style.color = '';
+        }
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////// EDITOR UNDO_HISTORY ///////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////
 
@@ -92,7 +178,7 @@ class EditorManagerUndoHistory {
 ///////////////////////////////////////////////////////////////////////////////////////
 
 class EditorManagerContentSelection {
-  constructor(editor, state_change_clbk) {
+  constructor(editor, state_change_clbk, on_keypress_SAVE_clbk , on_keypress_COMMAND_PALETTE_clbk) {
     if (!editor) {
       throw new Error("EditorManagerContentSelection requires a valid editor element");
     }
@@ -100,9 +186,17 @@ class EditorManagerContentSelection {
     if (typeof state_change_clbk !== "function") {
       throw new Error("state_change_clbk must be a function");
     }
+    if (typeof on_keypress_SAVE_clbk !== "function") {
+      throw new Error("on_keypress_SAVE_clbk must be a function");
+    }
+    if (typeof on_keypress_COMMAND_PALETTE_clbk !== "function") {
+      throw new Error("on_keypress_COMMAND_PALETTE_clbk must be a function");
+    }
 
     this.editor_elem = editor;
     this.state_change_clbk = state_change_clbk;
+    this.on_keypress_SAVE_clbk = on_keypress_SAVE_clbk;
+    this.on_keypress_COMMAND_PALETTE_clbk = on_keypress_COMMAND_PALETTE_clbk;
     this.undo_history = new EditorManagerUndoHistory(this)
     this.setup_listeners()
   }
@@ -129,13 +223,13 @@ class EditorManagerContentSelection {
     this.editor_elem.addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
             e.preventDefault();
-            openCommandPalette(); // MSE_TODO
+            this.on_keypress_COMMAND_PALETTE_clbk(); // MSE_TODO openCommandPalette();
         } else if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
             e.preventDefault();
             this.undo_history.performUndo();
         } else if ((e.metaKey || e.ctrlKey) && e.key === 's') {
             e.preventDefault();
-            saveDocument(); // MSE_TODO
+            this.on_keypress_SAVE_clbk(); //saveDocument();
         }
     });
 
@@ -526,18 +620,18 @@ class EditorApp {
     const selectionPreview = document.querySelector('#selectionPreview > div');
     const promptInput = document.getElementById('promptInput');
 
-    function state_change_clbk() {
-      window.app.mng_preview.updatePreview();
-    }
+    let mng_ctx_sel    = new EditorManagerContentSelection(editor, 
+                                                           /*state_change_clbk                */ function () { window.app.mng_preview.updatePreview()  }, 
+                                                           /*on_keypress_SAVE_clbk            */ function () { window.app.mng_file_save.saveDocument() }, 
+                                                           /*on_keypress_COMMAND_PALETTE_clbk */ () => { });
+  
+    this.mng_preview   = new PreviewManager(mng_ctx_sel, preview, documentName);
+    this.mng_file_save = new EditorManagerFileSave(mng_ctx_sel, renderBtn, documentName);
+    this.mng_ctx_sel   = mng_ctx_sel
+    this.mng_paste     = new EditorManagerPaste(mng_ctx_sel);
 
-    let mng_ctx_sel = new EditorManagerContentSelection(editor, state_change_clbk);
-
-    this.mng_ctx_sel = mng_ctx_sel
-    this.mng_preview = new PreviewManager(mng_ctx_sel, preview, documentName);
-    this.mng_paste = new EditorManagerPaste(mng_ctx_sel);
-
-    let file_uploader = new EditorManagerFileUploader(mng_ctx_sel, documentName);
-    this.mng_drag_drop = new EditorManagerDragAndDrop(mng_ctx_sel, (file) => { file_uploader.uploadImage(file); } );
+    let file_uploader  = new EditorManagerFileUploader(mng_ctx_sel, documentName);
+    this.mng_drag_drop = new EditorManagerDragAndDrop(mng_ctx_sel, (file) => { file_uploader.uploadImage(file); /* arrow to capture local var*/ } );
 
   }
 }
