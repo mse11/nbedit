@@ -221,6 +221,46 @@ class EditorManagerContentSelection {
     this.state_change_clbk();
   }
 
+  stateSet_dragANDdrop_Replace(markdown)
+  {
+    console.log('Markdown to insert:', markdown);
+    console.log('Type of markdown:', typeof markdown);
+    console.log('First 100 chars:', markdown.substring(0, 100));
+       
+    // Save undo state before modifying editor content
+    this.undo_history.saveUndoState();
+       
+    // Insert figure markdown at cursor position
+    const cursorPos = this.editor_elem.selectionStart;
+    const textBefore = this.editor_elem.value.substring(0, cursorPos);
+    const textAfter = this.editor_elem.value.substring(cursorPos);
+       
+    const newText = textBefore + markdown + '\n\n' + textAfter;
+    this.editor_elem.value = newText;
+       
+    console.log('Editor content after insert:', this.editor_elem.value);
+       
+    // Update preview immediately to see the figure
+    this.state_change_clbk();
+       
+    // Find and select the caption placeholder for easy editing
+    const captionPlaceholder = 'ADD_CAPTION_HERE';
+    const captionStart = newText.indexOf(captionPlaceholder, cursorPos);
+       
+    if (captionStart !== -1) {
+        // Focus editor and select the placeholder text so user can type caption immediately
+        editor.focus();
+        editor.setSelectionRange(captionStart, captionStart + captionPlaceholder.length);
+        console.log(`Selected "${captionPlaceholder}" at position ${captionStart}-${captionStart + captionPlaceholder.length}`);
+    } else {
+        // Fallback: position cursor after the figure
+        const newCursorPos = cursorPos + markdown.length + 2;
+        editor.focus();
+        editor.setSelectionRange(newCursorPos, newCursorPos);
+        console.log(`Caption placeholder not found, positioned cursor at ${newCursorPos}`);
+    }
+  }
+
   contentGet() {
     return this.editor_elem.value
   }
@@ -305,12 +345,136 @@ class PreviewManager {
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////// EDITOR FILEUPLOAD //////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////
+
+class EditorManagerFileUploader {
+    constructor(mng_ctx_sel, documentName_elem) {
+
+        EditorManagerContentSelection.assertInstance(mng_ctx_sel)
+
+        this.mng_ctx_sel = mng_ctx_sel;
+        this.documentName_elem = documentName_elem;
+    }
+
+    async uploadImage(file) {
+        const docName = this.documentName_elem.value.trim();
+        if (!docName) {
+            alert('Please enter a document name before uploading images');
+            return;
+        }
+   
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('documentName', docName);
+       
+            const response = await fetch('/api/upload-image', {
+                method: 'POST',
+                body: formData
+            });
+       
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Upload failed');
+            }
+       
+            const result = await response.json();
+            console.log('Upload result:', result);
+            this.mng_ctx_sel.stateSet_dragANDdrop_Replace(result.markdown)
+
+            console.log('Image uploaded:', result.filename);
+       
+        } catch (error) {
+            console.error('Upload error:', error);
+            alert(`Failed to upload image: ${error.message}`);
+        }
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////// EDITOR DRAG&DROP //////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////
+
+class EditorManagerDragAndDrop {
+
+  constructor(mng_ctx_sel,
+              handleDropPerFileFilter_clbk,
+              highlightClasses = ['border-blue-400', 'bg-blue-50'],
+              fileFilter = 'image/')
+  {
+
+    EditorManagerContentSelection.assertInstance(mng_ctx_sel)
+
+    this.handleDropPerFileFilter_clbk = handleDropPerFileFilter_clbk;
+    this.mng_ctx_sel = mng_ctx_sel;
+    this.highlightClasses = highlightClasses;
+    this.fileFilter = fileFilter;
+
+    this.dragCounter = 0;
+
+    this.setup_listeners();
+  }
+
+  setup_listeners() {
+    const preventDefaults = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const highlight = () => {
+      this.dragCounter++;
+      this.mng_ctx_sel.editor().classList.add(...this.highlightClasses);
+    };
+
+    const unhighlight = () => {
+      this.dragCounter--;
+      if (this.dragCounter === 0) {
+        this.mng_ctx_sel.editor().classList.remove(...this.highlightClasses);
+      }
+    };
+
+    const handleDropPerFileFilter = async (e) => {
+      this.dragCounter = 0;
+      this.mng_ctx_sel.editor().classList.remove(...this.highlightClasses);
+
+      const files = Array.from(e.dataTransfer.files);
+
+      for (const file of files) {
+        if (!this.fileFilter || file.type.startsWith(this.fileFilter)) {
+          await this.handleDropPerFileFilter_clbk(file);
+        }
+      }
+    };
+
+    // Register listeners
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+      this.mng_ctx_sel.editor().addEventListener(eventName, preventDefaults, false);
+      document.body.addEventListener(eventName, preventDefaults, false);
+    });
+
+    ['dragenter', 'dragover'].forEach(eventName => {
+      this.mng_ctx_sel.editor().addEventListener(eventName, highlight, false);
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+      this.mng_ctx_sel.editor().addEventListener(eventName, unhighlight, false);
+    });
+
+    this.mng_ctx_sel.editor().addEventListener('drop', handleDropPerFileFilter, false);
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
 /////////////////////////////// EDITOR PASTE //////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////
 
 class EditorManagerPaste
 {
     constructor(mng_ctx_sel) {
+
+        EditorManagerContentSelection.assertInstance(mng_ctx_sel)
+
         this.mng_ctx_sel = mng_ctx_sel;
         this.setup_listeners()
     }
@@ -352,6 +516,7 @@ class EditorManagerPaste
 class EditorApp {
   constructor()
   {
+
     // DOM elements
     const editor = document.getElementById('editor');
     const preview = document.getElementById('preview');
@@ -366,9 +531,14 @@ class EditorApp {
     }
 
     let mng_ctx_sel = new EditorManagerContentSelection(editor, state_change_clbk);
+
     this.mng_ctx_sel = mng_ctx_sel
     this.mng_preview = new PreviewManager(mng_ctx_sel, preview, documentName);
     this.mng_paste = new EditorManagerPaste(mng_ctx_sel);
+
+    let file_uploader = new EditorManagerFileUploader(mng_ctx_sel, documentName);
+    this.mng_drag_drop = new EditorManagerDragAndDrop(mng_ctx_sel, (file) => { file_uploader.uploadImage(file); } );
+
   }
 }
 
