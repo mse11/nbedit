@@ -18,7 +18,7 @@ class StateUndoHistory {
 /////////////////////////////// EDITOR DOCUMENT_SAVE //////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////
 
-class EditorManagerFileSave {
+class ServiceManagerFileSave {
     constructor(mng_ctx_sel, renderBtn_elem, documentName_elem) {
 
         EditorManagerContentSelection.assertInstance(mng_ctx_sel)
@@ -223,7 +223,7 @@ class EditorManagerContentSelection {
     this.editor_elem.addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
             e.preventDefault();
-            this.on_keypress_COMMAND_PALETTE_clbk(); // MSE_TODO openCommandPalette();
+            this.on_keypress_COMMAND_PALETTE_clbk(); // openCommandPalette();
         } else if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
             e.preventDefault();
             this.undo_history.performUndo();
@@ -386,6 +386,314 @@ class EditorManagerContentSelection {
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////// COMMAND PALLETE /////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////
+
+class AIManagerResult {
+    constructor(
+        mng_ctx_sel,
+        aiModal_elem,
+        aiModal_commandName_elem , aiModal_attemptNumber_elem,
+        aiModal_originalText_elem, aiModal_originalTextSection_elem,
+        aiModal_resultText_elem  , aiModal_resultTextSection_elem,
+        aiModal_acceptBtn, aiModal_rerunBtn, aiModal_cancelBtn
+    ) {
+        EditorManagerContentSelection.assertInstance(mng_ctx_sel);
+
+        if (
+            !aiModal_elem ||
+            !aiModal_commandName_elem  || !aiModal_attemptNumber_elem       ||
+            !aiModal_originalText_elem || !aiModal_originalTextSection_elem ||
+            !aiModal_resultText_elem   || !aiModal_resultTextSection_elem   ||
+            !aiModal_acceptBtn || !aiModal_rerunBtn || !aiModal_cancelBtn
+        ) {
+            throw new Error('AIManagerResult: Missing required DOM elements');
+        }
+
+        this.mng_ctx_sel = mng_ctx_sel;
+        this.aiModal_elem = aiModal_elem;
+
+        this.aiModal_commandName_elem = aiModal_commandName_elem;
+        this.aiModal_attemptNumber_elem = aiModal_attemptNumber_elem;
+
+        this.aiModal_originalText_elem = aiModal_originalText_elem;
+        this.aiModal_originalTextSection_elem = aiModal_originalTextSection_elem;
+
+        this.aiModal_resultText_elem = aiModal_resultText_elem;
+        this.aiModal_resultTextSection_elem = aiModal_resultTextSection_elem;
+
+        this.aiModal_acceptBtn = aiModal_acceptBtn;
+        this.aiModal_rerunBtn = aiModal_rerunBtn;
+        this.aiModal_cancelBtn = aiModal_cancelBtn;
+
+        this.state = {
+            isOpen: false,
+            command: null,
+            attempts: 0,
+            history: [],
+            selectionStart: 0,
+            selectionEnd: 0,
+            selectedText: '',
+        };
+
+        this.setup_listeners();
+    }
+
+    setup_listeners = () => {
+        this.aiModal_elem.addEventListener('click', (e) => {
+            if (e.target === this.aiModal_elem) {
+                this.closeResultModal();
+            }
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (!this.state.isOpen) return;
+            if (this.aiModal_acceptBtn.disabled) return;
+
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                this.acceptResult();
+            } else if (e.key.toLowerCase() === 'x') {
+                e.preventDefault();
+                this.rerunCommand();
+            } else if (e.key === 'Escape') {
+                this.closeResultModal();
+            }
+        });
+
+        this.aiModal_acceptBtn.addEventListener('click', () => this.acceptResult());
+        this.aiModal_rerunBtn.addEventListener('click', () => this.rerunCommand());
+        this.aiModal_cancelBtn.addEventListener('click', () => this.closeResultModal());
+    };
+
+    closeResultModal = () => {
+        this.state.isOpen = false;
+        this.aiModal_elem.classList.add('hidden');
+    };
+
+    acceptResult = () => {
+        const resultText = this.aiModal_resultText_elem.textContent;
+        this.mng_ctx_sel.stateSet_insertORedit(resultText, this.state.selectionStart, this.state.selectionEnd);
+        this.closeResultModal();
+    };
+
+    destroy = () => {
+        this.closeResultModal();
+    };
+
+    processTextWithAPI = async (text, command) => {
+        try {
+            const contextBefore = this.mng_ctx_sel.getContextBefore();
+            const contextAfter = this.mng_ctx_sel.getContextAfter();
+
+            const response = await fetch('/api/process', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    text,
+                    prompt: command.customPrompt,
+                    attempt: this.state.attempts || 1,
+                    context: { before: contextBefore, after: contextAfter },
+                }),
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.message || 'API request failed');
+            }
+
+            const data = await response.json();
+            return data.result;
+        } catch (error) {
+            console.error('API Error:', error);
+            return `[API Error: ${error.message}]\n\nFallback response for "${command.customPrompt}"`;
+        }
+    };
+
+    executeCommand = async (command, selectedText, selectionStart, selectionEnd) => {
+        this.state.command = command;
+        this.state.attempts = 1;
+        this.state.selectedText = selectedText;
+        this.state.selectionStart = selectionStart;
+        this.state.selectionEnd = selectionEnd;
+
+        this.showLoadingModal(command.customPrompt);
+        this.mng_ctx_sel.maintainSelection();
+
+        try {
+            const result = await this.processTextWithAPI(selectedText, command);
+            this.showResultModal(result);
+            this.mng_ctx_sel.maintainSelection();
+        } catch (error) {
+            console.error('Command execution failed:', error);
+            this.showResultModal(`Error: ${error.message}`);
+        }
+    };
+
+    rerunCommand = async () => {
+        if (!this.state.command) return;
+        this.state.attempts++;
+        this.showLoadingModal(this.state.command.customPrompt);
+        this.mng_ctx_sel.maintainSelection();
+
+        try {
+            const result = await this.processTextWithAPI(this.state.selectedText, this.state.command);
+            this.showResultModal(result);
+            this.mng_ctx_sel.maintainSelection();
+        } catch (error) {
+            console.error('Rerun command failed:', error);
+            this.showResultModal(`Error: ${error.message}`);
+        }
+    };
+
+    showLoadingModal = (prompt) => {
+        this.aiModal_commandName_elem.textContent = prompt;
+        this.aiModal_attemptNumber_elem.textContent = this.state.attempts;
+
+        if (this.state.selectedText) {
+            this.aiModal_originalText_elem.textContent = this.state.selectedText;
+            this.aiModal_originalTextSection_elem.style.display = 'block';
+        } else {
+            this.aiModal_originalTextSection_elem.style.display = 'none';
+        }
+
+        this.aiModal_resultTextSection_elem.style.display = 'block';
+        this.aiModal_resultText_elem.innerHTML = `
+            <div class="flex items-center gap-2 text-gray-500">
+                <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-500"></div>
+                Processing your request...
+            </div>
+        `;
+
+        this.aiModal_acceptBtn.disabled = true;
+        this.aiModal_rerunBtn.disabled = true;
+
+        this.state.isOpen = true;
+        this.aiModal_elem.classList.remove('hidden');
+    };
+
+    showResultModal = (result) => {
+        this.aiModal_commandName_elem.textContent = this.state.command.customPrompt;
+        this.aiModal_attemptNumber_elem.textContent = this.state.attempts;
+        this.aiModal_resultText_elem.textContent = result;
+
+        if (this.state.selectedText) {
+            this.aiModal_originalText_elem.textContent = this.state.selectedText;
+            this.aiModal_originalTextSection_elem.style.display = 'block';
+        } else {
+            this.originalTextSection_elem.style.display = 'none';
+        }
+
+        this.aiModal_acceptBtn.disabled = false;
+        this.aiModal_rerunBtn.disabled = false;
+
+        this.state.isOpen = true;
+        this.aiModal_elem.classList.remove('hidden');
+    };
+
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+
+class CommandPaletteManager {
+    constructor(
+        mng_ctx_sel,
+        mng_ai_result,
+        commandPalette_elem,
+        promptInput_elem,
+        selectionPreview_elem,
+        selectionPreviewContainer_elem,
+    ) {
+        EditorManagerContentSelection.assertInstance(mng_ctx_sel);
+
+        if (!commandPalette_elem || !promptInput_elem || !selectionPreview_elem || !selectionPreviewContainer_elem) {
+            throw new Error('CommandPaletteManager: Missing required DOM elements');
+        }
+
+        this.mng_ctx_sel = mng_ctx_sel;
+        this.commandPalette_elem = commandPalette_elem;
+        this.promptInput_elem = promptInput_elem;
+        this.selectionPreview_elem = selectionPreview_elem;
+        this.selectionPreviewContainer_elem = selectionPreviewContainer_elem;
+        this.mng_ai_result = mng_ai_result;
+
+        this.state = {
+            selectedText: '',
+            selectionStart: 0,
+            selectionEnd: 0,
+            commandPalette: { isOpen: false },
+        };
+
+        this.setup_listeners();
+    }
+
+    setup_listeners = () => {
+        this.promptInput_elem.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                this.submitPrompt();
+            } else if (e.key === 'Escape') {
+                this.closeCommandPalette();
+            }
+        });
+
+        document.addEventListener('click', (e) => {
+            if (this.state.commandPalette.isOpen && !this.commandPalette_elem.contains(e.target)) {
+                this.closeCommandPalette();
+            }
+        });
+    };
+
+    openCommandPalette = () => {
+        const [start, end, text] = this.mng_ctx_sel.selectionDatatGet();
+        this.state.selectionStart = start;
+        this.state.selectionEnd = end;
+
+        if (text) {
+            this.state.selectedText = text;
+            this.selectionPreview_elem.textContent = text;
+            this.selectionPreviewContainer_elem.classList.remove('hidden');
+            this.promptInput_elem.placeholder = "What would you like to do with this text?";
+        } else {
+            this.state.selectedText = '';
+            this.selectionPreviewContainer_elem.classList.add('hidden');
+            this.promptInput_elem.placeholder = "What would you like to write?";
+        }
+
+        this.state.commandPalette.isOpen = true;
+        this.promptInput_elem.value = '';
+        this.commandPalette_elem.classList.remove('hidden');
+        setTimeout(() => this.promptInput_elem.focus(), 10);
+    };
+
+    closeCommandPalette = () => {
+        this.state.commandPalette.isOpen = false;
+        this.commandPalette_elem.classList.add('hidden');
+    };
+
+    submitPrompt = () => {
+        const prompt = this.promptInput_elem.value.trim();
+        if (prompt) {
+            const command = { id: 'custom', name: 'Custom Prompt', customPrompt: prompt };
+            this.closeCommandPalette();
+            this.mng_ctx_sel.maintainSelection();
+            this.mng_ai_result.executeCommand(
+                command,
+                this.state.selectedText,
+                this.state.selectionStart,
+                this.state.selectionEnd
+            );
+        }
+    };
+
+    open = () => this.openCommandPalette();
+    close = () => this.closeCommandPalette();
+    isOpen = () => this.state.commandPalette.isOpen;
+    getSelectedText = () => this.state.selectedText || '';
+    destroy = () => { this.closeCommandPalette();};
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////// PREVIEW .MD /////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////
 
@@ -442,7 +750,7 @@ class PreviewManager {
 /////////////////////////////// EDITOR FILEUPLOAD //////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////
 
-class EditorManagerFileUploader {
+class ServiceManagerFileUploader {
     constructor(mng_ctx_sel, documentName_elem) {
 
         EditorManagerContentSelection.assertInstance(mng_ctx_sel)
@@ -611,29 +919,66 @@ class EditorApp {
   constructor()
   {
 
-    // DOM elements
-    const editor = document.getElementById('editor');
-    const preview = document.getElementById('preview');
-    const documentName = document.getElementById('documentName');
-    const commandPalette = document.getElementById('commandPalette');
-    const resultModal = document.getElementById('resultModal');
-    const selectionPreview = document.querySelector('#selectionPreview > div');
-    const promptInput = document.getElementById('promptInput');
+    // EDITOR MANAGERs 
+    const editor            = document.getElementById('editor');
 
-    let mng_ctx_sel    = new EditorManagerContentSelection(editor, 
+    let mng_ctx_sel         = new EditorManagerContentSelection(editor, 
                                                            /*state_change_clbk                */ function () { window.app.mng_preview.updatePreview()  }, 
-                                                           /*on_keypress_SAVE_clbk            */ function () { window.app.mng_file_save.saveDocument() }, 
-                                                           /*on_keypress_COMMAND_PALETTE_clbk */ () => { });
+                                                           /*on_keypress_SAVE_clbk            */ function () { window.app.srv_file_save.saveDocument() }, 
+                                                           /*on_keypress_COMMAND_PALETTE_clbk */ function () { window.app.mng_cmd_pallete.openCommandPalette() });
   
-    this.mng_preview   = new PreviewManager(mng_ctx_sel, preview, documentName);
-    this.mng_file_save = new EditorManagerFileSave(mng_ctx_sel, renderBtn, documentName);
-    this.mng_ctx_sel   = mng_ctx_sel
-    this.mng_paste     = new EditorManagerPaste(mng_ctx_sel);
+    this.mng_ctx_sel        = mng_ctx_sel
+    this.mng_paste          = new EditorManagerPaste(mng_ctx_sel);
+    this.mng_drag_drop      = new EditorManagerDragAndDrop(mng_ctx_sel, (file) => { window.app.srv_file_uploader.uploadImage(file); /* arrow to capture local var*/ } );
 
-    let file_uploader  = new EditorManagerFileUploader(mng_ctx_sel, documentName);
-    this.mng_drag_drop = new EditorManagerDragAndDrop(mng_ctx_sel, (file) => { file_uploader.uploadImage(file); /* arrow to capture local var*/ } );
+    // EDITOR SERVICESs
+    const documentName      = document.getElementById('documentName');
+    const renderBtn         = document.getElementById('renderBtn')
 
+    this.srv_file_uploader  = new ServiceManagerFileUploader(mng_ctx_sel, documentName);
+    this.srv_file_save      = new ServiceManagerFileSave(mng_ctx_sel, renderBtn, documentName);
+    
+    // PREVIEW
+    const preview           = document.getElementById('preview');
+    this.mng_preview        = new PreviewManager(mng_ctx_sel, preview, documentName);
+
+    // AI PROMPT
+    const aiModal                      = document.getElementById('resultModal');
+    const aiModal_commandName          = document.getElementById('commandName');
+    const aiModal_attemptNumber        = document.getElementById('attemptNumber');
+    const aiModal_originalText         = document.getElementById('originalText'); 
+    const aiModal_originalTextSection  = document.querySelector('#resultModal .mb-4')
+    const aiModal_resultText           = document.getElementById('resultText'); 
+    const aiModal_resultTextSection    = document.querySelector('#resultModal .mb-6')
+    const aiModal_acceptBtn            = document.getElementById('acceptBtn')
+    const aiModal_rerunBtn             = document.getElementById('rerunBtn')
+    const aiModal_cancelBtn            = document.getElementById('cancelBtn')
+
+    let mng_ai_modal_result = new AIManagerResult(
+        mng_ctx_sel,
+        aiModal,
+        aiModal_commandName, aiModal_attemptNumber,
+        aiModal_originalText, aiModal_originalTextSection,
+        aiModal_resultText, aiModal_resultTextSection,
+        aiModal_acceptBtn, aiModal_rerunBtn, aiModal_cancelBtn
+    )
+    this.mng_ai_modal_result = mng_ai_modal_result;
+
+    const commandPalette                           = document.getElementById('commandPalette');
+    const commandPalette_selectionPreviewContainer = document.getElementById('selectionPreview');
+    const commandPalette_selectionPreview          = document.querySelector('#selectionPreview > div');
+    const commandPalette_promptInput               = document.getElementById('promptInput');
+
+    this.mng_cmd_pallete = new CommandPaletteManager(
+        mng_ctx_sel,
+        mng_ai_modal_result,
+        commandPalette,
+        commandPalette_promptInput,
+        commandPalette_selectionPreview,
+        commandPalette_selectionPreviewContainer,
+    )
   }
+
 }
 
 // Initialize app
