@@ -627,10 +627,10 @@ def load_system_prompt(file_path: Path) -> str:
 ##################################### CLI (TYPER) ###########################################
 #############################################################################################
 cli = typer.Typer()
-@cli.command()
+@cli.command('serve')
 def serve(
     write_folder: str = typer.Option(
-        ..., 
+        ..., # means mandatory
         "--write-folder", 
         "-w",
         help="Path to folder where documents and images will be saved"
@@ -703,6 +703,18 @@ def serve(
         print(f"\nUsing system prompt: {system_prompt_preview[:100]}{'...' if len(system_prompt_preview) > 100 else ''}")
     
     app.run(debug=debug, host=host, port=port)
+
+@cli.command('api')
+def api(
+    models: bool = typer.Option(
+    False, # no argument
+        "--models",
+        "-m",
+        help="list available models"
+    )):
+        """Non GUI interactions"""
+        for m in llm.get_models():
+            print(getattr(m, 'name', m.model_id))
 
 if __name__ == '__main__':
     cli()
